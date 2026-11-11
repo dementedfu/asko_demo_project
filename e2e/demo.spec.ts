@@ -416,3 +416,55 @@ test("five-pair forty-photo control set stays local and opens quickly", async ({
   });
   await page.context().setOffline(false);
 });
+
+test("clickable sole wish persists and reaches master on mobile", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await init(page);
+  await button(page, "Рассказать о своей паре").click();
+  await page.getByLabel("Тип обуви", { exact: true }).selectOption("Кеды");
+  await page.getByLabel("Цвет", { exact: true }).fill("Белый");
+  await button(page, "Далее").click();
+  await button(page, "Вид снизу").click();
+  await page
+    .getByRole("button", { name: "Выбрать участок: Подошва", exact: true })
+    .click();
+  await expect(page.getByLabel("Комментарий к отметке")).toBeFocused();
+  await button(page, "Тщательно очистить протектор").click();
+  await button(page, "Добавить отметку").click();
+  await page
+    .getByRole("button", { name: "Открыть отметку 1: Подошва" })
+    .click();
+  await expect(page.getByLabel("Комментарий к отметке")).toHaveValue(
+    "Тщательно очистить протектор",
+  );
+  await page.screenshot({
+    path: "test-results/interactive-sole-mobile.png",
+    fullPage: true,
+  });
+  await noOverflow(page);
+  await expect(page.getByText("Сохранено", { exact: true })).toBeVisible();
+  await page.reload();
+  await button(page, "Далее").click();
+  await expect(
+    page.getByText(/Тщательно очистить протектор/).last(),
+  ).toBeVisible();
+  await button(page, "Далее").click();
+  await button(page, "Далее").click();
+  await button(page, "Отправить заявку").click();
+  await expect(page.getByTestId("pair-card")).toHaveCount(1);
+  const id = new URL(page.url()).hash.split("/").at(-1)!;
+  await role(page, "Мастер");
+  await route(page, "/workshop/orders/" + id);
+  await page.getByText("Описание и фотографии", { exact: false }).click();
+  await button(page, "Вид снизу").click();
+  await page
+    .getByRole("button", { name: "Открыть отметку 1: Подошва" })
+    .click();
+  await expect(
+    page
+      .getByRole("status")
+      .filter({ hasText: "Тщательно очистить протектор" }),
+  ).toBeVisible();
+});

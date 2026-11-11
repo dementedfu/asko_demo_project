@@ -22,3 +22,29 @@ it("adds a right-shoe damage mark through accessible controls and can remove it"
     screen.queryByText(/Правый · Носок · Повреждение/),
   ).not.toBeInTheDocument();
 });
+it("selects the sole directly, saves a wish and reopens its marker", async () => {
+  const user = userEvent.setup();
+  render(<Harness />);
+  await user.click(screen.getByRole("button", { name: "Вид снизу" }));
+  await user.click(
+    screen.getByRole("button", { name: "Выбрать участок: Подошва" }),
+  );
+  expect(screen.getByLabelText("Комментарий к отметке")).toHaveFocus();
+  await user.click(
+    screen.getByRole("button", { name: "Тщательно очистить протектор" }),
+  );
+  await user.click(screen.getByRole("button", { name: "Добавить отметку" }));
+  await user.click(
+    screen.getByRole("button", { name: "Открыть отметку 1: Подошва" }),
+  );
+  expect(screen.getByLabelText("Комментарий к отметке")).toHaveValue(
+    "Тщательно очистить протектор",
+  );
+  await user.clear(screen.getByLabelText("Комментарий к отметке"));
+  await user.type(
+    screen.getByLabelText("Комментарий к отметке"),
+    "Уделить внимание подошве",
+  );
+  await user.click(screen.getByRole("button", { name: "Сохранить отметку" }));
+  expect(screen.getByText(/Уделить внимание подошве/)).toBeInTheDocument();
+});
