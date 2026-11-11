@@ -23,7 +23,7 @@ export interface Order {
 }
 export interface Client {id:string;name:string;initials:string;phone:string}
 export interface Service {id:string;name:string;description:string;price:number;active:boolean}
-export interface Photo {id:string;orderId:string;pairId:string;purpose:Purpose;zone?:string;blob:Blob;name:string;at:string}
+export interface Photo {id:string;orderId:string;pairId:string;purpose:Purpose;zone?:string;blob?:Blob;asset?:string;name:string;at:string}
 export type OrderStatus='draft'|'active'|'completed'|'cancelled';
 export type OrderCommand =
  | {type:'submit'}

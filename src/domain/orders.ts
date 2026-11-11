@@ -25,7 +25,7 @@ export function pairLabel(pair:Pair):string {
   if(!accepted(pair))return 'Нужно согласование';
   return pair.custody==='workshop'?'Можно начинать':'Ожидаем передачу';
 }
-const requireThat=(condition:unknown,message:string):asserts condition=>{if(!condition)throw new Error(message)};
+const requireThat:(condition:unknown,message:string)=>asserts condition=(condition,message)=>{if(!condition)throw new Error(message)};
 export function applyCommand(original:Order,command:OrderCommand,actor:Actor,now=new Date().toISOString()):Order {
   requireThat(actor.role==='master'||original.clientId===actor.clientId,'Этот заказ принадлежит другому клиенту');
   const master=()=>requireThat(actor.role==='master','Действие доступно мастеру');
