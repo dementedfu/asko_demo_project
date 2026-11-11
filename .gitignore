@@ -2,8 +2,13 @@
 node_modules/
 dist/
 .superpowers/
-.agents/
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/speckit-*/
 .env*
 !.env.example
 playwright-report/
 test-results/
+
+*.tsbuildinfo

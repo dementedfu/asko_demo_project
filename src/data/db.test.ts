@@ -1,15 +1,278 @@
-import {beforeEach,describe,it,expect} from 'vitest';
-import {Blob as NativeBlob} from 'node:buffer';
-import {db,initializeDemo,resetDemo,createDraft,saveDraft,commitOrder,storePhoto,removePhoto,repeatPair} from './db';
-import {currentQuote} from '../domain/orders';
-import type {Actor} from '../domain/model';
-const client:Actor={role:'client',clientId:'anna'},master:Actor={role:'master',clientId:'anna'};
-beforeEach(async()=>{await db.delete();await db.open();await initializeDemo();});
-describe('persistent demo',()=>{
- it('seeds once and restores draft changes instead of replacing on startup',async()=>{const d=await createDraft('anna');d.pairs[0].type='Ботинки';d.pairs[0].color='Чёрный';await saveDraft(d,client);await initializeDemo();expect((await db.orders.get(d.id))?.pairs[0].type).toBe('Ботинки');expect(await db.clients.count()).toBe(3);});
- it('commits shared role state and rejects an old agreement after re-quote',async()=>{const o=(await db.orders.toArray()).find(o=>o.clientId==='anna'&&o.pairs.some(p=>p.quotes.length&&!p.excluded&&p.work==='not_started'))!;const p=o.pairs.find(p=>p.quotes.length&&!p.excluded&&p.work==='not_started')!;const old=currentQuote(p)!;await commitOrder(o.id,{type:'quote',pairId:p.id,expectedQuoteId:old.id,lines:old.lines,deadline:old.deadline,limitations:old.limitations,reason:'Уточнение'},master);await expect(commitOrder(o.id,{type:'decision',pairId:p.id,quoteId:old.id,status:'accepted',comment:''},client)).rejects.toThrow(/обнов/);expect((await db.orders.get(o.id))?.pairs.find(x=>x.id===p.id)?.quotes).toHaveLength(p.quotes.length+1);});
- it('persists image blobs, separates limits per stage and protects previous data',async()=>{const d=await createDraft('anna');d.pairs[0].type='Кроссовки';d.pairs[0].color='Белые';await saveDraft(d,client);const blob=new NativeBlob(['demo-image'],{type:'image/jpeg'}) as unknown as Blob;for(let i=0;i<8;i++)await storePhoto({orderId:d.id,pairId:d.pairs[0].id,purpose:'client',blob,name:'shoe.jpg'},client);await expect(storePhoto({orderId:d.id,pairId:d.pairs[0].id,purpose:'client',blob,name:'extra.jpg'},client)).rejects.toThrow(/8/);await commitOrder(d.id,{type:'submit'},client);await commitOrder(d.id,{type:'intake',pairId:d.pairs[0].id,condition:'Состояние зафиксировано',accessories:[],expertNote:''},master);await storePhoto({orderId:d.id,pairId:d.pairs[0].id,purpose:'intake',blob,name:'intake.jpg'},master);expect(await db.photos.where('pairId').equals(d.pairs[0].id).count()).toBe(9);const photos=await db.photos.where('pairId').equals(d.pairs[0].id).toArray();const photo=photos.find(p=>p.purpose==='client')!;expect(photo.blob?.size).toBe(blob.size);await expect(removePhoto(photo.id,{role:'client',clientId:'other'})).rejects.toThrow();expect(await db.photos.get(photo.id)).toBeDefined();await expect(removePhoto(photo.id,client)).rejects.toThrow();const intake=photos.find(p=>p.purpose==='intake')!;await removePhoto(intake.id,master);expect(await db.photos.get(intake.id)).toBeUndefined();});
- it('does not persist an invalid command or history fragment',async()=>{const d=await createDraft('anna');const before=await db.orders.get(d.id);await expect(commitOrder(d.id,{type:'start',pairId:d.pairs[0].id},master)).rejects.toThrow();expect(await db.orders.get(d.id)).toEqual(before);});
- it('removes pair photos with draft removal and repeats only stable characteristics',async()=>{const d=await createDraft('anna');d.pairs[0].type='Кеды';d.pairs[0].color='Белые';d.pairs[0].brand='Demo';d.pairs[0].issues=[{id:'i',side:'both',zone:'Верх',category:'dirt',kind:'Пыль',severity:2,comment:''}];await saveDraft(d,client);const repeat=await repeatPair(d.id,d.pairs[0].id,client);expect(repeat.pairs[0].brand).toBe('Demo');expect(repeat.pairs[0].issues).toEqual([]);expect(repeat.pairs[0].quotes).toEqual([]);const extra={...d.pairs[0],id:crypto.randomUUID()};d.pairs.push(extra);await saveDraft(d,client);await storePhoto({orderId:d.id,pairId:extra.id,purpose:'client',blob:new Blob(['x'],{type:'image/jpeg'}),name:'x.jpg'},client);d.pairs=d.pairs.filter(p=>p.id!==extra.id);await saveDraft(d,client);expect(await db.photos.where('pairId').equals(extra.id).count()).toBe(0);});
- it('resets custom changes and initialises a coherent scenario set',async()=>{const d=await createDraft('anna');expect(await db.orders.get(d.id)).toBeDefined();await resetDemo();expect(await db.orders.get(d.id)).toBeUndefined();expect(await db.orders.count()).toBeGreaterThanOrEqual(8);});
+import { beforeEach, describe, it, expect, vi } from "vitest";
+import { Blob as NativeBlob } from "node:buffer";
+import {
+  db,
+  initializeDemo,
+  resetDemo,
+  createDraft,
+  saveDraft,
+  commitOrder,
+  storePhoto,
+  removePhoto,
+  replacePhoto,
+  repeatPair,
+} from "./db";
+import { currentQuote } from "../domain/orders";
+import type { Actor } from "../domain/model";
+const client: Actor = { role: "client", clientId: "anna" },
+  master: Actor = { role: "master", clientId: "anna" };
+beforeEach(async () => {
+  await db.delete();
+  await db.open();
+  await initializeDemo();
+});
+describe("persistent demo", () => {
+  it("seeds once and restores draft changes instead of replacing on startup", async () => {
+    const d = await createDraft("anna");
+    d.pairs[0].type = "Ботинки";
+    d.pairs[0].color = "Чёрный";
+    await saveDraft(d, client);
+    await initializeDemo();
+    expect((await db.orders.get(d.id))?.pairs[0].type).toBe("Ботинки");
+    expect(await db.clients.count()).toBe(3);
+  });
+  it("commits shared role state and rejects an old agreement after re-quote", async () => {
+    const o = (await db.orders.toArray()).find(
+      (o) =>
+        o.clientId === "anna" &&
+        o.pairs.some(
+          (p) => p.quotes.length && !p.excluded && p.work === "not_started",
+        ),
+    )!;
+    const p = o.pairs.find(
+      (p) => p.quotes.length && !p.excluded && p.work === "not_started",
+    )!;
+    const old = currentQuote(p)!;
+    await commitOrder(
+      o.id,
+      {
+        type: "quote",
+        pairId: p.id,
+        expectedQuoteId: old.id,
+        lines: old.lines,
+        deadline: old.deadline,
+        limitations: old.limitations,
+        reason: "Уточнение",
+      },
+      master,
+    );
+    await expect(
+      commitOrder(
+        o.id,
+        {
+          type: "decision",
+          pairId: p.id,
+          quoteId: old.id,
+          status: "accepted",
+          comment: "",
+        },
+        client,
+      ),
+    ).rejects.toThrow(/обнов/);
+    expect(
+      (await db.orders.get(o.id))?.pairs.find((x) => x.id === p.id)?.quotes,
+    ).toHaveLength(p.quotes.length + 1);
+  });
+  it("persists image blobs, separates limits per stage and protects previous data", async () => {
+    const d = await createDraft("anna");
+    d.pairs[0].type = "Кроссовки";
+    d.pairs[0].color = "Белые";
+    await saveDraft(d, client);
+    const blob = new NativeBlob(["demo-image"], {
+      type: "image/jpeg",
+    }) as unknown as Blob;
+    for (let i = 0; i < 8; i++)
+      await storePhoto(
+        {
+          orderId: d.id,
+          pairId: d.pairs[0].id,
+          purpose: "client",
+          blob,
+          name: "shoe.jpg",
+        },
+        client,
+      );
+    await expect(
+      storePhoto(
+        {
+          orderId: d.id,
+          pairId: d.pairs[0].id,
+          purpose: "client",
+          blob,
+          name: "extra.jpg",
+        },
+        client,
+      ),
+    ).rejects.toThrow(/8/);
+    await commitOrder(d.id, { type: "submit" }, client);
+    await commitOrder(
+      d.id,
+      {
+        type: "intake",
+        pairId: d.pairs[0].id,
+        condition: "Состояние зафиксировано",
+        accessories: [],
+        expertNote: "",
+      },
+      master,
+    );
+    await storePhoto(
+      {
+        orderId: d.id,
+        pairId: d.pairs[0].id,
+        purpose: "intake",
+        blob,
+        name: "intake.jpg",
+      },
+      master,
+    );
+    expect(await db.photos.where("pairId").equals(d.pairs[0].id).count()).toBe(
+      9,
+    );
+    const photos = await db.photos
+      .where("pairId")
+      .equals(d.pairs[0].id)
+      .toArray();
+    const photo = photos.find((p) => p.purpose === "client")!;
+    expect(photo.blob?.size).toBe(blob.size);
+    await expect(
+      removePhoto(photo.id, { role: "client", clientId: "other" }),
+    ).rejects.toThrow();
+    expect(await db.photos.get(photo.id)).toBeDefined();
+    await expect(removePhoto(photo.id, client)).rejects.toThrow();
+    const intake = photos.find((p) => p.purpose === "intake")!;
+    await removePhoto(intake.id, master);
+    expect(await db.photos.get(intake.id)).toBeUndefined();
+  });
+  it("does not persist an invalid command or history fragment", async () => {
+    const d = await createDraft("anna");
+    const before = await db.orders.get(d.id);
+    await expect(
+      commitOrder(d.id, { type: "start", pairId: d.pairs[0].id }, master),
+    ).rejects.toThrow();
+    expect(await db.orders.get(d.id)).toEqual(before);
+  });
+  it("removes pair photos with draft removal and repeats only stable characteristics", async () => {
+    const d = await createDraft("anna");
+    d.pairs[0].type = "Кеды";
+    d.pairs[0].color = "Белые";
+    d.pairs[0].brand = "Demo";
+    d.pairs[0].issues = [
+      {
+        id: "i",
+        side: "both",
+        zone: "Верх",
+        category: "dirt",
+        kind: "Пыль",
+        severity: 2,
+        comment: "",
+      },
+    ];
+    await saveDraft(d, client);
+    const repeat = await repeatPair(d.id, d.pairs[0].id, client);
+    expect(repeat.pairs[0].brand).toBe("Demo");
+    expect(repeat.pairs[0].issues).toEqual([]);
+    expect(repeat.pairs[0].quotes).toEqual([]);
+    const extra = { ...d.pairs[0], id: crypto.randomUUID() };
+    d.pairs.push(extra);
+    await saveDraft(d, client);
+    await storePhoto(
+      {
+        orderId: d.id,
+        pairId: extra.id,
+        purpose: "client",
+        blob: new Blob(["x"], { type: "image/jpeg" }),
+        name: "x.jpg",
+      },
+      client,
+    );
+    d.pairs = d.pairs.filter((p) => p.id !== extra.id);
+    await saveDraft(d, client);
+    expect(await db.photos.where("pairId").equals(extra.id).count()).toBe(0);
+  });
+  it("resets custom changes and initialises a coherent scenario set", async () => {
+    const d = await createDraft("anna");
+    expect(await db.orders.get(d.id)).toBeDefined();
+    await resetDemo();
+    expect(await db.orders.get(d.id)).toBeUndefined();
+    expect(await db.orders.count()).toBeGreaterThanOrEqual(8);
+  });
+});
+
+it("replaces a draft photo atomically and keeps original on invalid replacement", async () => {
+  const d = await createDraft("anna");
+  const blob = new NativeBlob(["original"], {
+    type: "image/jpeg",
+  }) as unknown as Blob;
+  await storePhoto(
+    {
+      orderId: d.id,
+      pairId: d.pairs[0].id,
+      purpose: "client",
+      blob,
+      name: "original.jpg",
+    },
+    client,
+  );
+  const original = (await db.photos.where("orderId").equals(d.id).toArray())[0];
+  await expect(
+    replacePhoto(
+      original.id,
+      new NativeBlob(["bad"], { type: "text/plain" }) as unknown as Blob,
+      "bad.txt",
+      client,
+    ),
+  ).rejects.toThrow();
+  expect((await db.photos.get(original.id))?.name).toBe("original.jpg");
+  await replacePhoto(original.id, blob, "replacement.jpg", client);
+  const photos = await db.photos.where("orderId").equals(d.id).toArray();
+  expect(photos).toHaveLength(1);
+  expect(photos[0].name).toBe("replacement.jpg");
+  expect(
+    (await db.orders.get(d.id))?.events.some((e) => e.text.includes("фото")),
+  ).toBe(true);
+});
+
+it("rejects stale draft edits without deleting a new pair or its photos", async () => {
+  const first = await createDraft("anna");
+  const stale = structuredClone(first);
+  first.pairs.push({ ...first.pairs[0], id: crypto.randomUUID() });
+  await saveDraft(first, client, 0);
+  await storePhoto(
+    {
+      orderId: first.id,
+      pairId: first.pairs[1].id,
+      purpose: "client",
+      blob: new NativeBlob(["x"], { type: "image/jpeg" }) as unknown as Blob,
+      name: "new-pair.jpg",
+    },
+    client,
+  );
+  stale.pairs[0].color = "Старое изменение";
+  await expect(saveDraft(stale, client, 0)).rejects.toThrow(/другой вкладке/);
+  expect((await db.orders.get(first.id))?.pairs).toHaveLength(2);
+  expect(await db.photos.where("orderId").equals(first.id).count()).toBe(1);
+});
+
+it("rolls back photo and event if storage fails before the order is written", async () => {
+  const d = await createDraft("anna");
+  const before = await db.orders.get(d.id);
+  const spy = vi
+    .spyOn(db.orders, "put")
+    .mockRejectedValueOnce(new Error("QuotaExceededError"));
+  await expect(
+    storePhoto(
+      {
+        orderId: d.id,
+        pairId: d.pairs[0].id,
+        purpose: "client",
+        blob: new NativeBlob(["x"], { type: "image/jpeg" }) as unknown as Blob,
+        name: "quota.jpg",
+      },
+      client,
+    ),
+  ).rejects.toThrow("QuotaExceededError");
+  spy.mockRestore();
+  expect(await db.photos.where("orderId").equals(d.id).count()).toBe(0);
+  expect(await db.orders.get(d.id)).toEqual(before);
 });
